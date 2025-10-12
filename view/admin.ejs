@@ -1,1 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Settings</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: <%= theme === 'dark' ? '#1f2937' : '#f3f4f6' %>;
+      color: <%= theme === 'dark' ? '#ffffff' : '#000000' %>;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      max-width: 600px;
+      margin: auto;
+      padding: 20px;
+      border: <%= borderShadow %>;
+      border-radius: 8px;
+      background-color: <%= theme === 'dark' ? '#374151' : '#ffffff' %>;
+    }
+    h1 {
+      text-align: center;
+      color: <%= theme === 'dark' ? '#ffffff' : '#000000' %>;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input[type="number"], select, input[type="password"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid <%= theme === 'dark' ? '#4b5563' : '#ccc' %>;
+      border-radius: 4px;
+      background-color: <%= theme === 'dark' ? '#4b5563' : '#ffffff' %>;
+      color: <%= theme === 'dark' ? '#ffffff' : '#000000' %>;
+    }
+    input[type="checkbox"] {
+      margin-right: 8px;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: <%= buttonColor %>;
+      color: <%= buttonTextColor %>;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: bold;
+    }
+    button:hover {
+      opacity: 0.9;
+    }
+    p {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1><%= headerHtml %></h1>
+    <p style="color: <%= subheaderColor %>;"><%= subheaderText %></p>
+    <p>Total Users: <%= userCount %></p>
+    <p>Total Active Subscribers: <%= subscriberCount %></p>
+    <form id="adminSettingsForm">
+      <div class="form-group">
+        <label for="restrictionsEnabled">
+          <input type="checkbox" id="restrictionsEnabled" name="restrictionsEnabled" <%= restrictionsEnabled ? 'checked' : '' %>>
+          Enable Restrictions
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="linkLifespanValue">Link Lifespan Value</label>
+        <input type="number" id="linkLifespanValue" name="linkLifespanValue" value="<%= linkLifespanValue || 7 %>" min="1" required>
+      </div>
+      <div class="form-group">
+        <label for="linkLifespanUnit">Link Lifespan Unit</label>
+        <select id="linkLifespanUnit" name="linkLifespanUnit" required>
+          <option value="seconds" <%= linkLifespanUnit === 'seconds' ? 'selected' : '' %>>Seconds</option>
+          <option value="minutes" <%= linkLifespanUnit === 'minutes' ? 'selected' : '' %>>Minutes</option>
+          <option value="hours" <%= linkLifespanUnit === 'hours' ? 'selected' : '' %>>Hours</option>
+          <option value="days" <%= linkLifespanUnit === 'days' ? 'selected' : '' %>>Days</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="maxFormsPerUserPerDay">Max Forms Per User Per Day</label>
+        <input type="number" id="maxFormsPerUserPerDay" name="maxFormsPerUserPerDay" value="<%= maxFormsPerUserPerDay || 10 %>" min="1" required>
+      </div>
+      <div class="form-group">
+        <label for="maxFormsPer6HoursForSubscribers">Max Forms Per 6 Hours For Subscribers</label>
+        <input type="number" id="maxFormsPer6HoursForSubscribers" name="maxFormsPer6HoursForSubscribers" value="<%= maxFormsPer6HoursForSubscribers || 50 %>" min="1" required>
+      </div>
+      <div class="form-group">
+        <label for="adminPassword">Admin Password</label>
+        <input type="password" id="adminPassword" name="adminPassword" required>
+      </div>
+      <button type="submit"><%= buttonText %></button>
+    </form>
+  </div>
 
+  <script>
+    document.getElementById('adminSettingsForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = {
+        restrictionsEnabled: document.getElementById('restrictionsEnabled').checked,
+        linkLifespanValue: document.getElementById('linkLifespanValue').value,
+        linkLifespanUnit: document.getElementById('linkLifespanUnit').value,
+        maxFormsPerUserPerDay: document.getElementById('maxFormsPerUserPerDay').value,
+        maxFormsPer6HoursForSubscribers: document.getElementById('maxFormsPer6HoursForSubscribers').value,
+        adminPassword: document.getElementById('adminPassword').value
+      };
+
+      try {
+        const response = await fetch('/admin/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(formData)
+        });
+        const result = await response.json();
+        if (response.ok) {
+          alert(result.message);
+        } else {
+          alert(`Error: ${result.error}`);
+        }
+      } catch (error) {
+        console.error('Error submitting settings:', error);
+        alert('Failed to update settings');
+      }
+    });
+  </script>
+</body>
+</html>
