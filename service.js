@@ -19,23 +19,25 @@ if (!TELEGRAM_BOT_TOKEN) {
   process.exit(1);
 }
 
-// Rate limiters
-const generalLimiter = {
+// Rate limit configs (will be used after plugin registration)
+const generalLimiterConfig = {
   windowMs: 15 * 60 * 1000,
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  bodyLimit: false, // Disable body parsing limit for this plugin
 };
 
-const forgotPasswordLimiter = {
+const forgotPasswordLimiterConfig = {
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: { error: 'Too many forgot password attempts from this IP. Please try again after 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
+  bodyLimit: false,
 };
 
-// MongoDB Connection
+// MongoDB Connection (unchanged)
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/plexzora';
 console.log('Attempting to connect to MongoDB with URI:', MONGODB_URI.replace(/:([^:@]+)@/, ':****@'));
 
@@ -134,7 +136,7 @@ const AdminSettings = mongoose.model('AdminSettings', adminSettingsSchema);
 const Subscription = mongoose.model('Subscription', subscriptionSchema);
 const Telegram = mongoose.model('Telegram', telegramSchema);
 
-// Initialize default admin settings
+// Initialize default admin settings (unchanged)
 async function initializeAdminSettings() {
   try {
     const settings = await AdminSettings.findOne();
@@ -155,7 +157,7 @@ async function initializeAdminSettings() {
   }
 }
 
-// MongoDB connection handling
+// MongoDB connection handling (unchanged)
 mongoose.connection.once('open', async () => {
   console.log('MongoDB connection is open');
   try {
@@ -389,6 +391,7 @@ async function verifyPaystackWebhook(req, reply) {
 // Fastify Plugins Registration
 const start = async () => {
   try {
+    // Register CORS
     await fastify.register(require('@fastify/cors'), {
       origin: ['http://localhost:3000', 'https://plexzora.onrender.com', 'https://smavo.onrender.com'],
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -396,15 +399,17 @@ const start = async () => {
       credentials: false,
     });
 
-    await fastify.register(require('@fastify/rate-limit'), generalLimiter);
-    await fastify.register(require('@fastify/rate-limit'), { prefix: 'forgot-password', ...forgotPasswordLimiter });
+    // Register global rate limit (default for most routes)
+    await fastify.register(require('@fastify/rate-limit'), generalLimiterConfig);
 
+    // Register view engine
     await fastify.register(require('@fastify/view'), {
       engine: { ejs: require('ejs') },
       includeViewExtension: true,
       templatesDir: path.join(__dirname, 'views'),
     });
 
+    // Register static files
     await fastify.register(require('@fastify/static'), {
       root: path.join(__dirname, 'public'),
     });
@@ -425,7 +430,7 @@ const start = async () => {
       }
     });
 
-    fastify.post('/signup', { onRequest: [fastify.rateLimit] }, async (req, reply) => {
+    fastify.post('/signup', { preHandler: fastify.rateLimit() }, async (req, reply) => {
       try {
         const { username, email, password } = req.body;
         if (!email || !password) {
@@ -458,7 +463,7 @@ const start = async () => {
       }
     });
 
-    fastify.post('/login', { onRequest: [fastify.rateLimit] }, async (req, reply) => {
+    fastify.post('/login', { preHandler: fastify.rateLimit() }, async (req, reply) => {
       try {
         const { email, password } = req.body;
         if (!email || !password) {
@@ -483,7 +488,10 @@ const start = async () => {
       }
     });
 
-    fastify.post('/forgot-password', { onRequest: [fastify.forgotPasswordRateLimit] }, async (req, reply) => {
+    // Specific rate limit for forgot/reset password routes
+    const forgotPasswordLimiterHook = fastify.rateLimit(forgotPasswordLimiterConfig);
+
+    fastify.post('/forgot-password', { preHandler: forgotPasswordLimiterHook }, async (req, reply) => {
       try {
         const { email } = req.body;
         if (!email) {
@@ -502,7 +510,7 @@ const start = async () => {
       }
     });
 
-    fastify.post('/reset-password', { onRequest: [fastify.forgotPasswordRateLimit] }, async (req, reply) => {
+    fastify.post('/reset-password', { preHandler: forgotPasswordLimiterHook }, async (req, reply) => {
       try {
         const { email, password } = req.body;
         if (!email || !password) {
@@ -891,7 +899,8 @@ const start = async () => {
       }
     });
 
-    fastify.post('/form/:id/submit', { onRequest: [fastify.rateLimit] }, async (req, reply) => {
+    // Use global rate limit for submissions
+    fastify.post('/form/:id/submit', { preHandler: fastify.rateLimit() }, async (req, reply) => {
       const formId = req.params.id;
 
       const config = await FormConfig.findOne({ formId });
