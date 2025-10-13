@@ -1,53 +1,32 @@
+'use strict';
+
 const fastify = require('fastify')({ logger: true });
-const path = require('path');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const axios = require('axios');
 const { Telegraf } = require('telegraf');
 const crypto = require('crypto');
+const path = require('path');
+const pointOfView = require('point-of-view');
+const ejs = require('ejs');
 require('dotenv').config();
 
-const port = process.env.PORT || 3000;
+// Environment variables
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-here';
-const ADMIN_PASSWORD_HASH = require('bcryptjs').hashSync('midas', 10);
+const ADMIN_PASSWORD_HASH = bcrypt.hashSync('midas', 10);
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/plexzora';
 
-fastify.addHook('preHandler', (request, reply, done) => {
-  fastify.trustProxy = 3;
-  done();
-});
-
+// Validate Telegram bot token
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error('TELEGRAM_BOT_TOKEN is not defined in environment variables');
+  fastify.log.error('TELEGRAM_BOT_TOKEN is not defined in environment variables');
   process.exit(1);
 }
 
-// Plugins
-const fp = require('fastify-plugin');
-
-// Rate Limiters
-const rateLimit = require('@fastify/rate-limit');
-fastify.register(rateLimit, {
-  max: 15,
-  timeWindow: '15 minutes',
-  keyGenerator: (request) => request.ip,
-  allowList: [],
-  hook: 'onRequest',
-  routeInfo: { url: request.url },
-});
-
-// Specific for forgot/reset
-const forgotPasswordLimiter = rateLimit({
-  max: 5,
-  timeWindow: '15 minutes',
-  keyGenerator: (request) => request.ip,
-  errorResponse: {
-    error: 'Too many forgot password attempts from this IP. Please try again after 15 minutes.',
-  },
-});
-
-fastify.register(forgotPasswordLimiter, { prefix: '/forgot-password' });
-fastify.register(forgotPasswordLimiter, { prefix: '/reset-password' });
-
-// CORS
+// Register Fastify plugins
 fastify.register(require('@fastify/cors'), {
   origin: ['http://localhost:3000', 'https://plexzora.onrender.com', 'https://smavo.onrender.com'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -55,40 +34,35 @@ fastify.register(require('@fastify/cors'), {
   credentials: false,
 });
 
-// Static files
 fastify.register(require('@fastify/static'), {
   root: path.join(__dirname, 'public'),
   prefix: '/',
 });
 
-// Views (EJS)
-fastify.register(require('@fastify/view'), {
-  engine: { ejs: require('ejs') },
-  root: path.join(__dirname, 'views'),
-  includeViewExtension: true,
+fastify.register(require('point-of-view'), {
+  engine: { ejs },
+  templates: path.join(__dirname, 'views'),
 });
 
-// JWT Plugin
-fastify.register(require('@fastify/jwt'), { secret: JWT_SECRET });
+fastify.register(require('@fastify/rate-limit'), {
+  global: false, // We'll define rate limits per route
+});
 
 // MongoDB Connection
-const mongoose = require('mongoose');
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/plexzora';
-console.log('Attempting to connect to MongoDB with URI:', MONGODB_URI.replace(/:([^:@]+)@/, ':****@'));
-
+fastify.log.info('Attempting to connect to MongoDB with URI:', MONGODB_URI.replace(/:([^:@]+)@/, ':****@'));
 mongoose.connect(MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
   connectTimeoutMS: 30000,
   retryWrites: true,
 }).then(() => {
-  console.log('Successfully connected to MongoDB');
+  fastify.log.info('Successfully connected to MongoDB');
 }).catch(err => {
-  console.error('MongoDB connection error:', err.message, err.stack);
+  fastify.log.error('MongoDB connection error:', err.message, err.stack);
   process.exit(1);
 });
 
-// Mongoose Schemas (same as original)
+// Mongoose Schemas
 const submissionSchema = new mongoose.Schema({
   userId: { type: String, required: true, index: true },
   formId: { type: String, required: true, index: true },
@@ -184,31 +158,31 @@ async function initializeAdminSettings() {
         maxFormsPer6HoursForSubscribers: 50,
         restrictionsEnabled: true,
       });
-      console.log('Created default admin settings');
+      fastify.log.info('Created default admin settings');
     }
   } catch (err) {
-    console.error('Error initializing admin settings:', err.message, err.stack);
+    fastify.log.error('Error initializing admin settings:', err.message, err.stack);
     throw err;
   }
 }
 
 // MongoDB connection handling
 mongoose.connection.once('open', async () => {
-  console.log('MongoDB connection is open');
+  fastify.log.info('MongoDB connection is open');
   try {
     await initializeAdminSettings();
   } catch (err) {
-    console.error('Initialization failed:', err.message, err.stack);
+    fastify.log.error('Initialization failed:', err.message, err.stack);
     process.exit(1);
   }
 });
 
 mongoose.connection.on('error', (err) => {
-  console.error('MongoDB connection error:', err.message, err.stack);
+  fastify.log.error('MongoDB connection error:', err.message, err.stack);
   process.exit(1);
 });
 
-// Initialize Telegram bot (same)
+// Initialize Telegram bot
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
 bot.start(async (ctx) => {
@@ -234,36 +208,34 @@ bot.start(async (ctx) => {
       { userId, chatId, createdAt: new Date() },
       { upsert: true }
     );
-    console.log(`Linked Telegram chatId ${chatId} to userId ${userId}`);
+    fastify.log.info(`Linked Telegram chatId ${chatId} to userId ${userId}`);
     ctx.reply('Your Telegram account is now connected! You will receive form submission notifications here.');
   } catch (error) {
-    console.error('Error saving Telegram chatId:', error.message);
+    fastify.log.error('Error saving Telegram chatId:', error.message);
     ctx.reply('Error connecting your Telegram account. Please try again later.');
   }
 });
 
 bot.launch().then(() => {
-  console.log('Telegram bot started');
+  fastify.log.info('Telegram bot started');
 }).catch((error) => {
-  console.error('Telegram bot failed to start:', error.message);
+  fastify.log.error('Telegram bot failed to start:', error.message);
   process.exit(1);
 });
 
-process.on('SIGINT', async () => {
-  await bot.stop('SIGINT');
-  await fastify.close();
-  console.log('Telegram bot stopped');
+process.on('SIGINT', () => {
+  bot.stop('SIGINT');
+  fastify.log.info('Telegram bot stopped');
   process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
-  await bot.stop('SIGTERM');
-  await fastify.close();
-  console.log('Telegram bot stopped');
+process.on('SIGTERM', () => {
+  bot.stop('SIGTERM');
+  fastify.log.info('Telegram bot stopped');
   process.exit(0);
 });
 
-// Utility functions (same as original)
+// Utility functions
 function normalizeUrl(url) {
   if (!url) return null;
   url = url.trim();
@@ -300,19 +272,19 @@ function sanitizeForJs(str) {
 async function isFormExpired(formId) {
   const config = await FormConfig.findOne({ formId });
   if (!config || !config.createdAt) {
-    console.log(`Form ${formId} not found or missing createdAt`);
+    fastify.log.info(`Form ${formId} not found or missing createdAt`);
     return true;
   }
 
   const adminSettings = await AdminSettings.findOne();
   const isSubscribed = await hasActiveSubscription(config.userId);
   if (isSubscribed || !adminSettings.restrictionsEnabled) {
-    console.log(`Expiration check skipped for form ${formId}: user is subscribed=${!!isSubscribed}, restrictionsEnabled=${adminSettings.restrictionsEnabled}`);
+    fastify.log.info(`Expiration check skipped for form ${formId}: user is subscribed=${!!isSubscribed}, restrictionsEnabled=${adminSettings.restrictionsEnabled}`);
     return false;
   }
 
   if (!adminSettings.linkLifespan) {
-    console.log(`No linkLifespan set for form ${formId}, assuming not expired`);
+    fastify.log.info(`No linkLifespan set for form ${formId}, assuming not expired`);
     return false;
   }
 
@@ -321,13 +293,13 @@ async function isFormExpired(formId) {
   const isExpired = (currentTime - createdTime) > adminSettings.linkLifespan;
 
   if (isExpired) {
-    console.log(`Form ${formId} is expired, deleting form and submissions`);
+    fastify.log.info(`Form ${formId} is expired, deleting form and submissions`);
     await FormConfig.deleteOne({ formId });
     await Submission.deleteMany({ formId });
-    console.log(`Deleted form ${formId} and its submissions`);
+    fastify.log.info(`Deleted form ${formId} and its submissions`);
   }
 
-  console.log(`Form ${formId} expiration check: createdAt=${config.createdAt}, currentTime=${currentTime}, linkLifespan=${adminSettings.linkLifespan}, isExpired=${isExpired}`);
+  fastify.log.info(`Form ${formId} expiration check: createdAt=${config.createdAt}, currentTime=${currentTime}, linkLifespan=${adminSettings.linkLifespan}, isExpired=${isExpired}`);
   return isExpired;
 }
 
@@ -342,7 +314,7 @@ async function countUserFormsToday(userId) {
     createdAt: { $gte: new Date(todayStart), $lt: new Date(todayEnd) },
   });
 
-  console.log(`Counted ${count} forms created today for user ${userId}`);
+  fastify.log.info(`Counted ${count} forms created today for user ${userId}`);
   return count;
 }
 
@@ -352,7 +324,7 @@ async function countUserFormsLast6Hours(userId) {
     userId,
     createdAt: { $gte: sixHoursAgo },
   });
-  console.log(`Counted ${count} forms created in last 6 hours for user ${userId}`);
+  fastify.log.info(`Counted ${count} forms created in last 6 hours for user ${userId}`);
   return count;
 }
 
@@ -365,7 +337,7 @@ async function getSubscriberCount() {
     status: 'active',
     endDate: { $gt: new Date() },
   });
-  console.log(`Counted ${activeSubscribers} active subscribers`);
+  fastify.log.info(`Counted ${activeSubscribers} active subscribers`);
   return activeSubscribers;
 }
 
@@ -377,88 +349,97 @@ async function hasActiveSubscription(userId) {
       endDate: { $gt: new Date() },
     }).sort({ createdAt: -1 });
     const hasActive = !!activeSubscription;
-    console.log(`User ${userId} has active subscription: ${hasActive}`, activeSubscription || {});
+    fastify.log.info(`User ${userId} has active subscription: ${hasActive}`, activeSubscription || {});
     return activeSubscription;
   } catch (error) {
-    console.error('Error checking subscription status:', error.message);
+    fastify.log.error('Error checking subscription status:', error.message);
     return null;
   }
 }
 
-// Auth Hook Plugin
-async function authenticateTokenHook(fastify, opts) {
-  fastify.addHook('preHandler', async (request, reply) => {
-    const authHeader = request.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.error('No token provided in Authorization header');
-      return reply.code(401).send({ error: 'No token provided' });
-    }
+async function authenticateToken(req, reply) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    fastify.log.error('No token provided in Authorization header');
+    reply.status(401).send({ error: 'No token provided' });
+    return;
+  }
 
-    const token = authHeader.split(' ')[1];
-    try {
-      const decoded = fastify.jwt.verify(token);
-      console.log('Token decoded:', decoded);
-      request.user = decoded;
-    } catch (error) {
-      console.error('Token verification error:', error.message);
-      return reply.code(401).send({ error: 'Invalid or expired token' });
-    }
-  });
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    fastify.log.info('Token decoded:', decoded);
+    req.user = decoded;
+  } catch (error) {
+    fastify.log.error('Token verification error:', error.message);
+    reply.status(401).send({ error: 'Invalid or expired token' });
+  }
 }
-fastify.register(authenticateTokenHook, { prefix: '/user,/get,/create,/api/form,/form/submission,/submissions,/api/telegram' }); // Apply to protected routes
 
-// Paystack Webhook Verification Hook
-async function verifyPaystackWebhookHook(fastify, opts) {
-  fastify.addHook('preHandler', async (request, reply) => {
-    const hash = crypto
-      .createHmac('sha512', PAYSTACK_SECRET_KEY)
-      .update(JSON.stringify(request.body))
-      .digest('hex');
-    const signature = request.headers['x-paystack-signature'];
-
-    if (!signature || hash !== signature) {
-      console.error('Paystack webhook verification failed');
-      return reply.code(401).send({ error: 'Invalid webhook signature' });
-    }
-
-    console.log('Paystack webhook signature verified successfully');
-  });
+async function verifyAdminPassword(req, reply) {
+  const { adminPassword } = req.body;
+  if (!adminPassword || !bcrypt.compareSync(adminPassword, ADMIN_PASSWORD_HASH)) {
+    reply.status(401).send({ error: 'Invalid admin password' });
+    return;
+  }
 }
-fastify.register(verifyPaystackWebhookHook, { prefix: '/api/subscription/webhook' });
+
+async function verifyPaystackWebhook(req, reply) {
+  const hash = crypto
+    .createHmac('sha512', PAYSTACK_SECRET_KEY)
+    .update(JSON.stringify(req.body))
+    .digest('hex');
+  const signature = req.headers['x-paystack-signature'];
+
+  if (!signature || hash !== signature) {
+    fastify.log.error('Paystack webhook verification failed');
+    reply.status(401).send({ error: 'Invalid webhook signature' });
+    return;
+  }
+
+  fastify.log.info('Paystack webhook signature verified successfully');
+}
 
 // Routes
-fastify.get('/user', async (request, reply) => {
+fastify.get('/user', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    const user = await User.findOne({ id: request.user.userId });
+    const user = await User.findOne({ id: req.user.userId });
     if (!user) {
-      return reply.code(404).send({ error: 'User not found' });
+      return reply.status(404).send({ error: 'User not found' });
     }
 
     const { id, username, email, createdAt } = user;
-    return {
-      user: { id, username, email, createdAt },
-      message: 'User info retrieved successfully',
-    };
+    return { user: { id, username, email, createdAt }, message: 'User info retrieved successfully' };
   } catch (error) {
-    console.error('Error fetching user info:', error);
-    return reply.code(500).send({ error: 'Failed to fetch user info' });
+    fastify.log.error('Error fetching user info:', error);
+    return reply.status(500).send({ error: 'Failed to fetch user info' });
   }
 });
 
-fastify.post('/signup', async (request, reply) => {
+fastify.post('/signup', {
+  preHandler: fastify.rateLimit({
+    max: 15,
+    timeWindow: '15m',
+    errorResponseBuilder: () => ({
+      error: 'Too many signup attempts from this IP. Please try again after 15 minutes.',
+    }),
+  }),
+}, async (req, reply) => {
   try {
-    const { username, email, password } = request.body;
+    const { username, email, password } = req.body;
     if (!email || !password) {
-      return reply.code(400).send({ error: 'Email and password are required' });
+      return reply.status(400).send({ error: 'Email and password are required' });
     }
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return reply.code(400).send({ error: 'User already exists with this email' });
+      return reply.status(400).send({ error: 'User already exists with this email' });
     }
 
     const saltRounds = 10;
-    const hashedPassword = await require('bcryptjs').hash(password, saltRounds);
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     const newUser = new User({
       id: Date.now().toString(),
@@ -470,72 +451,96 @@ fastify.post('/signup', async (request, reply) => {
 
     await newUser.save();
 
-    const token = fastify.jwt.sign({ userId: newUser.id, email: newUser.email }, { expiresIn: '1h' });
-    return reply.code(201).send({ message: 'User created successfully', token });
+    const token = jwt.sign({ userId: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '1h' });
+    return reply.status(201).send({ message: 'User created successfully', token });
   } catch (error) {
-    console.error('Signup error:', error);
-    return reply.code(500).send({ error: 'Signup failed' });
+    fastify.log.error('Signup error:', error);
+    return reply.status(500).send({ error: 'Signup failed' });
   }
 });
 
-fastify.post('/login', async (request, reply) => {
+fastify.post('/login', {
+  preHandler: fastify.rateLimit({
+    max: 15,
+    timeWindow: '15m',
+    errorResponseBuilder: () => ({
+      error: 'Too many login attempts from this IP. Please try again after 15 minutes.',
+    }),
+  }),
+}, async (req, reply) => {
   try {
-    const { email, password } = request.body;
+    const { email, password } = req.body;
     if (!email || !password) {
-      return reply.code(400).send({ error: 'Email and password are required' });
+      return reply.status(400).send({ error: 'Email and password are required' });
     }
 
     const user = await User.findOne({ email });
     if (!user) {
-      return reply.code(401).send({ error: 'Invalid credentials' });
+      return reply.status(401).send({ error: 'Invalid credentials' });
     }
 
-    const isMatch = await require('bcryptjs').compare(password, user.password);
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return reply.code(401).send({ error: 'Invalid credentials' });
+      return reply.status(401).send({ error: 'Invalid credentials' });
     }
 
-    const token = fastify.jwt.sign({ userId: user.id, email: user.email }, { expiresIn: '100h' });
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '100h' });
     return { message: 'Login successful', token };
   } catch (error) {
-    console.error('Login error:', error);
-    return reply.code(500).send({ error: 'Login failed' });
+    fastify.log.error('Login error:', error);
+    return reply.status(500).send({ error: 'Login failed' });
   }
 });
 
-fastify.post('/forgot-password', async (request, reply) => {
+fastify.post('/forgot-password', {
+  preHandler: fastify.rateLimit({
+    max: 5,
+    timeWindow: '15m',
+    errorResponseBuilder: () => ({
+      error: 'Too many forgot password attempts from this IP. Please try again after 15 minutes.',
+    }),
+  }),
+}, async (req, reply) => {
   try {
-    const { email } = request.body;
+    const { email } = req.body;
     if (!email) {
-      return reply.code(400).send({ error: 'Email is required' });
+      return reply.status(400).send({ error: 'Email is required' });
     }
 
     const user = await User.findOne({ email });
     if (!user) {
-      return reply.code(404).send({ error: 'Email not found' });
+      return reply.status(404).send({ error: 'Email not found' });
     }
 
     return { message: 'Email found, proceed to reset' };
   } catch (error) {
-    console.error('Forgot password error:', error);
-    return reply.code(500).send({ error: 'Forgot password check failed' });
+    fastify.log.error('Forgot password error:', error);
+    return reply.status(500).send({ error: 'Forgot password check failed' });
   }
 });
 
-fastify.post('/reset-password', async (request, reply) => {
+fastify.post('/reset-password', {
+  preHandler: fastify.rateLimit({
+    max: 5,
+    timeWindow: '15m',
+    errorResponseBuilder: () => ({
+      error: 'Too many reset password attempts from this IP. Please try again after 15 minutes.',
+    }),
+  }),
+}, async (req, reply) => {
   try {
-    const { email, password } = request.body;
+    const { email, password } = req.body;
     if (!email || !password) {
-      return reply.code(400).send({ error: 'Email and new password are required' });
+      return reply.status(400).send({ error: 'Email and new password are required' });
     }
 
     const user = await User.findOne({ email });
     if (!user) {
-      return reply.code(404).send({ error: 'Email not found' });
+      return reply.status(404).send({ error: 'Email not found' });
     }
 
     const saltRounds = 10;
-    const hashedPassword = await require('bcryptjs').hash(password, saltRounds);
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
     user.password = hashedPassword;
     user.updatedAt = new Date().toISOString();
 
@@ -543,12 +548,12 @@ fastify.post('/reset-password', async (request, reply) => {
 
     return { message: 'Password reset successfully' };
   } catch (error) {
-    console.error('Reset password error:', error);
-    return reply.code(500).send({ error: 'Reset password failed' });
+    fastify.log.error('Reset password error:', error);
+    return reply.status(500).send({ error: 'Reset password failed' });
   }
 });
 
-fastify.get('/admin', async (request, reply) => {
+fastify.get('/admin', async (req, reply) => {
   try {
     const adminSettings = await AdminSettings.findOne();
     const userCount = await getUserCount();
@@ -571,41 +576,36 @@ fastify.get('/admin', async (request, reply) => {
       maxFormsPer6HoursForSubscribers: adminSettings.maxFormsPer6HoursForSubscribers,
     });
   } catch (error) {
-    console.error('Error rendering admin page:', error.message, error.stack);
-    return reply.code(500).send('Error rendering admin page');
+    fastify.log.error('Error rendering admin page:', error.message, error.stack);
+    return reply.status(500).send('Error rendering admin page');
   }
 });
 
-function verifyAdminPassword(request, reply) {
-  const { adminPassword } = request.body;
-  if (!adminPassword || !require('bcryptjs').compareSync(adminPassword, ADMIN_PASSWORD_HASH)) {
-    return reply.code(401).send({ error: 'Invalid admin password' });
-  }
-}
-
-fastify.post('/admin/settings', { preHandler: verifyAdminPassword }, async (request, reply) => {
+fastify.post('/admin/settings', {
+  preHandler: [verifyAdminPassword],
+}, async (req, reply) => {
   try {
-    const { linkLifespanValue, linkLifespanUnit, maxFormsPerUserPerDay, maxFormsPer6HoursForSubscribers, restrictionsEnabled } = request.body;
+    const { linkLifespanValue, linkLifespanUnit, maxFormsPerUserPerDay, maxFormsPer6HoursForSubscribers, restrictionsEnabled } = req.body;
 
     if (restrictionsEnabled) {
       if (!linkLifespanValue || !linkLifespanUnit || !maxFormsPerUserPerDay || !maxFormsPer6HoursForSubscribers) {
-        return reply.code(400).send({ error: 'Link lifespan value, unit, max forms per user per day, and max forms per 6 hours for subscribers are required when restrictions are enabled' });
+        return reply.status(400).send({ error: 'Link lifespan value, unit, max forms per user per day, and max forms per 6 hours for subscribers are required when restrictions are enabled' });
       }
 
       if (!Number.isInteger(Number(linkLifespanValue)) || Number(linkLifespanValue) <= 0) {
-        return reply.code(400).send({ error: 'Link lifespan value must be a positive integer' });
+        return reply.status(400).send({ error: 'Link lifespan value must be a positive integer' });
       }
 
       if (!['seconds', 'minutes', 'hours', 'days'].includes(linkLifespanUnit)) {
-        return reply.code(400).send({ error: 'Link lifespan unit must be one of: seconds, minutes, hours, days' });
+        return reply.status(400).send({ error: 'Link lifespan unit must be one of: seconds, minutes, hours, days' });
       }
 
       if (!Number.isInteger(Number(maxFormsPerUserPerDay)) || Number(maxFormsPerUserPerDay) <= 0) {
-        return reply.code(400).send({ error: 'Max forms per user per day must be a positive integer' });
+        return reply.status(400).send({ error: 'Max forms per user per day must be a positive integer' });
       }
 
       if (!Number.isInteger(Number(maxFormsPer6HoursForSubscribers)) || Number(maxFormsPer6HoursForSubscribers) <= 0) {
-        return reply.code(400).send({ error: 'Max forms per 6 hours for subscribers must be a positive integer' });
+        return reply.status(400).send({ error: 'Max forms per 6 hours for subscribers must be a positive integer' });
       }
     }
 
@@ -626,7 +626,7 @@ fastify.post('/admin/settings', { preHandler: verifyAdminPassword }, async (requ
           lifespanMs = value * 24 * 60 * 60 * 1000;
           break;
         default:
-          return reply.code(400).send({ error: 'Invalid link lifespan unit' });
+          return reply.status(400).send({ error: 'Invalid link lifespan unit' });
       }
     }
 
@@ -640,7 +640,7 @@ fastify.post('/admin/settings', { preHandler: verifyAdminPassword }, async (requ
     };
 
     await AdminSettings.updateOne({}, adminSettings, { upsert: true });
-    console.log('Admin settings updated:', adminSettings);
+    fastify.log.info('Admin settings updated:', adminSettings);
 
     if (adminSettings.restrictionsEnabled) {
       const expiredForms = await FormConfig.find({
@@ -651,23 +651,25 @@ fastify.post('/admin/settings', { preHandler: verifyAdminPassword }, async (requ
       if (expiredFormIds.length > 0) {
         await FormConfig.deleteMany({ formId: { $in: expiredFormIds } });
         await Submission.deleteMany({ formId: { $in: expiredFormIds } });
-        console.log(`Deleted ${expiredFormIds.length} expired forms during admin settings update`);
+        fastify.log.info(`Deleted ${expiredFormIds.length} expired forms during admin settings update`);
       }
     }
 
-    return reply.code(200).send({
+    return {
       message: 'Admin settings updated successfully',
       settings: adminSettings,
-    });
+    };
   } catch (error) {
-    console.error('Error updating admin settings:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to update admin settings', details: error.message });
+    fastify.log.error('Error updating admin settings:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to update admin settings', details: error.message });
   }
 });
 
-fastify.get('/api/telegram/connect', async (request, reply) => {
+fastify.get('/api/telegram/connect', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    const userId = request.user.userId;
+    const userId = req.user.userId;
     const subscription = await Subscription.findOne({
       userId,
       status: 'active',
@@ -675,31 +677,33 @@ fastify.get('/api/telegram/connect', async (request, reply) => {
     });
 
     if (!subscription) {
-      return reply.code(403).send({ error: 'You need an active subscription to connect Telegram for notifications.' });
+      return reply.status(403).send({ error: 'You need an active subscription to connect Telegram for notifications.' });
     }
 
     const telegramLink = `https://t.me/${bot.botInfo.username}?start=${userId}`;
-    console.log(`Generated Telegram link for user ${userId}: ${telegramLink}`);
+    fastify.log.info(`Generated Telegram link for user ${userId}: ${telegramLink}`);
     return {
       message: 'Telegram connect link generated successfully',
       telegramLink,
     };
   } catch (error) {
-    console.error('Error generating Telegram link:', error.message);
-    return reply.code(500).send({ error: 'Failed to generate Telegram link', details: error.message });
+    fastify.log.error('Error generating Telegram link:', error.message);
+    return reply.status(500).send({ error: 'Failed to generate Telegram link', details: error.message });
   }
 });
 
-fastify.get('/get', async (request, reply) => {
+fastify.get('/get', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    const userId = request.user.userId;
-    console.log(`Processing /get request for user ${userId}`);
+    const userId = req.user.userId;
+    fastify.log.info(`Processing /get request for user ${userId}`);
 
     const submissions = await Submission.find({ userId }).sort({ timestamp: -1 });
-    console.log(`Retrieved ${submissions.length} submissions for user ${userId}`);
+    fastify.log.info(`Retrieved ${submissions.length} submissions for user ${userId}`);
 
     const adminSettings = await AdminSettings.findOne();
-    console.log(`Loaded admin settings:`, adminSettings);
+    fastify.log.info(`Loaded admin settings:`, adminSettings);
 
     const activeSubscription = await hasActiveSubscription(userId);
     const isSubscribed = !!activeSubscription;
@@ -724,7 +728,7 @@ fastify.get('/get', async (request, reply) => {
         validForms.push(config.formId);
       }
     }
-    console.log(`User ${userId} forms: ${validForms.length} valid (${validForms.join(', ')})`);
+    fastify.log.info(`User ${userId} forms: ${validForms.length} valid (${validForms.join(', ')})`);
 
     const templates = {
       'sign-in': {
@@ -759,7 +763,7 @@ fastify.get('/get', async (request, reply) => {
       isSubscribed,
       subscriptionDetails,
     };
-    console.log(`Returning data for user ${userId}:`, {
+    fastify.log.info(`Returning data for user ${userId}:`, {
       submissionCount: responseData.submissions.length,
       formConfigCount: Object.keys(responseData.formConfigs).length,
       templateKeys: Object.keys(responseData.templates),
@@ -770,15 +774,17 @@ fastify.get('/get', async (request, reply) => {
 
     return responseData;
   } catch (error) {
-    console.error('Error fetching data for /get:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to fetch data', details: error.message });
+    fastify.log.error('Error fetching data for /get:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to fetch data', details: error.message });
   }
 });
 
-fastify.post('/create', async (request, reply) => {
+fastify.post('/create', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    console.log('Received /create request:', request.body);
-    const userId = request.user.userId;
+    fastify.log.info('Received /create request:', req.body);
+    const userId = req.user.userId;
     const adminSettings = await AdminSettings.findOne();
 
     const isSubscribed = await hasActiveSubscription(userId);
@@ -786,7 +792,7 @@ fastify.post('/create', async (request, reply) => {
     if (!isSubscribed && adminSettings.restrictionsEnabled) {
       const userFormCountToday = await countUserFormsToday(userId);
       if (userFormCountToday >= adminSettings.maxFormsPerUserPerDay) {
-        return reply.code(403).send({ error: `Maximum form limit (${adminSettings.maxFormsPerUserPerDay} per day) reached` });
+        return reply.status(403).send({ error: `Maximum form limit (${adminSettings.maxFormsPerUserPerDay} per day) reached` });
       }
     }
 
@@ -794,40 +800,40 @@ fastify.post('/create', async (request, reply) => {
       const userFormCountLast6Hours = await countUserFormsLast6Hours(userId);
       const maxFormsPer6Hours = adminSettings.maxFormsPer6HoursForSubscribers || 50;
       if (userFormCountLast6Hours >= maxFormsPer6Hours) {
-        return reply.code(403).send({ error: `form creation failed` });
+        return reply.status(403).send({ error: `form creation failed` });
       }
     }
 
-    const templateId = request.body.template || 'sign-in';
+    const templateId = req.body.template || 'sign-in';
     const formId = await generateShortCode();
     const validActions = ['url', 'message'];
     const config = {
       formId,
       userId,
       template: templateId,
-      headerText: request.body.headerText || 'My Form',
-      headerColors: Array.isArray(request.body.headerColors) ? request.body.headerColors.map(sanitizeForJs) : [],
-      subheaderText: request.body.subheaderText || 'Fill the form',
-      subheaderColor: request.body.subheaderColor || (request.body.theme === 'dark' ? '#d1d5db' : '#555555'),
-      placeholders: Array.isArray(request.body.placeholders) ? request.body.placeholders.map(p => ({
+      headerText: req.body.headerText || 'My Form',
+      headerColors: Array.isArray(req.body.headerColors) ? req.body.headerColors.map(sanitizeForJs) : [],
+      subheaderText: req.body.subheaderText || 'Fill the form',
+      subheaderColor: req.body.subheaderColor || (req.body.theme === 'dark' ? '#d1d5db' : '#555555'),
+      placeholders: Array.isArray(req.body.placeholders) ? req.body.placeholders.map(p => ({
         id: sanitizeForJs(p.id),
         placeholder: sanitizeForJs(p.placeholder),
       })) : [],
-      borderShadow: request.body.borderShadow || (request.body.theme === 'dark' ? '0 0 0 2px #ffffff' : '0 0 0 2px #000000'),
-      buttonColor: request.body.buttonColor || 'linear-gradient(45deg, #00b7ff, #0078ff)',
-      buttonTextColor: request.body.buttonTextColor || (request.body.buttonColor === '#ffffff' ? '#000000' : '#ffffff'),
-      buttonText: request.body.buttonText || 'Sign In',
-      buttonAction: validActions.includes(request.body.buttonAction) ? request.body.buttonAction : 'url',
-      buttonUrl: request.body.buttonUrl ? normalizeUrl(request.body.buttonUrl) : '',
-      buttonMessage: request.body.buttonMessage || '',
-      theme: request.body.theme === 'dark' ? 'dark' : 'light',
+      borderShadow: req.body.borderShadow || (req.body.theme === 'dark' ? '0 0 0 2px #ffffff' : '0 0 0 2px #000000'),
+      buttonColor: req.body.buttonColor || 'linear-gradient(45deg, #00b7ff, #0078ff)',
+      buttonTextColor: req.body.buttonTextColor || (req.body.buttonColor === '#ffffff' ? '#000000' : '#ffffff'),
+      buttonText: req.body.buttonText || 'Sign In',
+      buttonAction: validActions.includes(req.body.buttonAction) ? req.body.buttonAction : 'url',
+      buttonUrl: req.body.buttonUrl ? normalizeUrl(req.body.buttonUrl) : '',
+      buttonMessage: req.body.buttonMessage || '',
+      theme: req.body.theme === 'dark' ? 'dark' : 'light',
       createdAt: new Date().toISOString(),
       expiresAt: !isSubscribed && adminSettings.restrictionsEnabled ? new Date(Date.now() + adminSettings.linkLifespan).toISOString() : null,
     };
 
     if (config.buttonAction === 'url' && config.buttonUrl && !normalizeUrl(config.buttonUrl)) {
-      console.error('Invalid URL provided:', config.buttonUrl);
-      return reply.code(400).send({ error: 'Invalid URL provided' });
+      fastify.log.error('Invalid URL provided:', config.buttonUrl);
+      return reply.status(400).send({ error: 'Invalid URL provided' });
     }
     if (config.buttonAction === 'message' && !config.buttonMessage) {
       config.buttonMessage = 'Form submitted successfully!';
@@ -835,35 +841,37 @@ fastify.post('/create', async (request, reply) => {
 
     await new FormCreation({ userId, formId, createdAt: config.createdAt }).save();
     await new FormConfig(config).save();
-    console.log(`Stored form config for ${formId} for user ${userId}:`, config);
+    fastify.log.info(`Stored form config for ${formId} for user ${userId}:`, config);
 
     const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-    const host = request.headers.host || `localhost:${port}`;
+    const host = req.headers.host || `localhost:${PORT}`;
     const url = `${protocol}://${host}/form/${formId}`;
-    console.log('Generated URL:', url);
+    fastify.log.info('Generated URL:', url);
     return { url, formId, expiresAt: config.expiresAt };
   } catch (error) {
-    console.error('Error in /create:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to generate shareable link', details: error.message });
+    fastify.log.error('Error in /create:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to generate shareable link', details: error.message });
   }
 });
 
-fastify.put('/api/form/:id', async (request, reply) => {
+fastify.put('/api/form/:id', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    console.log('Received /api/form/:id PUT request:', request.body);
-    const formId = request.params.id;
-    const userId = request.user.userId;
-    const updatedConfig = request.body;
+    fastify.log.info('Received /api/form/:id PUT request:', req.body);
+    const formId = req.params.id;
+    const userId = req.user.userId;
+    const updatedConfig = req.body;
 
     const existingConfig = await FormConfig.findOne({ formId, userId });
     if (!existingConfig) {
-      console.error(`User ${userId} does not have access to form ${formId}`);
-      return reply.code(404).send({ error: 'Form not found or access denied' });
+      fastify.log.error(`User ${userId} does not have access to form ${formId}`);
+      return reply.status(404).send({ error: 'Form not found or access denied' });
     }
 
     const adminSettings = await AdminSettings.findOne();
     if (adminSettings.restrictionsEnabled && await isFormExpired(formId)) {
-      return reply.code(403).send({ error: 'Form has expired' });
+      return reply.status(403).send({ error: 'Form has expired' });
     }
 
     const isSubscribed = await hasActiveSubscription(userId);
@@ -897,42 +905,50 @@ fastify.put('/api/form/:id', async (request, reply) => {
     };
 
     if (config.buttonAction === 'url' && config.buttonUrl && !normalizeUrl(config.buttonUrl)) {
-      console.error('Invalid URL provided:', config.buttonUrl);
-      return reply.code(400).send({ error: 'Invalid URL provided' });
+      fastify.log.error('Invalid URL provided:', config.buttonUrl);
+      return reply.status(400).send({ error: 'Invalid URL provided' });
     }
     if (config.buttonAction === 'message' && !config.buttonMessage) {
       config.buttonMessage = 'Form submitted successfully!';
     }
 
     await FormConfig.updateOne({ formId }, config);
-    console.log(`Updated form config for ${formId} for user ${userId}:`, config);
+    fastify.log.info(`Updated form config for ${formId} for user ${userId}:`, config);
 
     const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-    const host = request.headers.host || `localhost:${port}`;
+    const host = req.headers.host || `localhost:${PORT}`;
     const url = `${protocol}://${host}/form/${formId}`;
-    console.log('Generated URL for updated form:', url);
+    fastify.log.info('Generated URL for updated form:', url);
     return { url, formId, message: 'Form updated successfully' };
   } catch (error) {
-    console.error('Error in /api/form/:id PUT:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to update form', details: error.message });
+    fastify.log.error('Error in /api/form/:id PUT:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to update form', details: error.message });
   }
 });
 
-fastify.post('/form/:id/submit', async (request, reply) => {
-  const formId = request.params.id;
+fastify.post('/form/:id/submit', {
+  preHandler: fastify.rateLimit({
+    max: 15,
+    timeWindow: '15m',
+    errorResponseBuilder: () => ({
+      error: 'Too many submission attempts from this IP. Please try again after 15 minutes.',
+    }),
+  }),
+}, async (req, reply) => {
+  const formId = req.params.id;
 
   const config = await FormConfig.findOne({ formId });
   if (!config) {
-    console.error(`Form not found for ID: ${formId}`);
-    return reply.code(404).send({ error: 'Form not found' });
+    fastify.log.error(`Form not found for ID: ${formId}`);
+    return reply.status(404).send({ error: 'Form not found' });
   }
   const adminSettings = await AdminSettings.findOne();
   if (adminSettings.restrictionsEnabled && await isFormExpired(formId)) {
-    return reply.code(403).send({ error: 'Form has expired' });
+    return reply.status(403).send({ error: 'Form has expired' });
   }
 
   try {
-    const formData = request.body;
+    const formData = req.body;
     const userId = config.userId;
     const templates = {
       'sign-in': {
@@ -975,10 +991,10 @@ fastify.post('/form/:id/submit', async (request, reply) => {
       data: mappedData,
     });
 
-    console.log(`Attempting to save submission for ${formId} by user ${userId}:`, submission);
+    fastify.log.info(`Attempting to save submission for ${formId} by user ${userId}:`, submission);
 
     await submission.save();
-    console.log(`Submission saved successfully for form ${formId} by user ${userId}`);
+    fastify.log.info(`Submission saved successfully for form ${formId} by user ${userId}`);
 
     try {
       const subscription = await Subscription.findOne({
@@ -993,82 +1009,88 @@ fastify.post('/form/:id/submit', async (request, reply) => {
             .map(([key, value]) => `${key}: ${value}`)
             .join('\n')}`;
           await bot.telegram.sendMessage(telegram.chatId, notificationMessage);
-          console.log(`Sent Telegram notification to chatId ${telegram.chatId} for user ${userId}`);
+          fastify.log.info(`Sent Telegram notification to chatId ${telegram.chatId} for user ${userId}`);
         } else {
-          console.log(`No Telegram chatId found for user ${userId}, skipping notification`);
+          fastify.log.info(`No Telegram chatId found for user ${userId}, skipping notification`);
         }
       } else {
-        console.log(`User ${userId} is not subscribed, skipping Telegram notification`);
+        fastify.log.info(`User ${userId} is not subscribed, skipping Telegram notification`);
       }
     } catch (telegramError) {
-      console.error('Error sending Telegram notification:', telegramError.message);
+      fastify.log.error('Error sending Telegram notification:', telegramError.message);
     }
 
     return { message: 'Submission saved successfully' };
   } catch (error) {
-    console.error('Error saving submission:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to save submission', details: error.message });
+    fastify.log.error('Error saving submission:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to save submission', details: error.message });
   }
 });
 
-fastify.delete('/form/:id/submission/:index', async (request, reply) => {
-  const formId = request.params.id;
-  const index = parseInt(request.params.index, 10);
-  const userId = request.user.userId;
+fastify.delete('/form/:id/submission/:index', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
+  const formId = req.params.id;
+  const index = parseInt(req.params.index, 10);
+  const userId = req.user.userId;
 
   try {
     const config = await FormConfig.findOne({ formId, userId });
     if (!config) {
-      console.error(`User ${userId} does not have access to form ${formId}`);
-      return reply.code(403).send({ error: 'Access denied: Form does not belong to you' });
+      fastify.log.error(`User ${userId} does not have access to form ${formId}`);
+      return reply.status(403).send({ error: 'Access denied: Form does not belong to you' });
     }
     const adminSettings = await AdminSettings.findOne();
     if (adminSettings.restrictionsEnabled && await isFormExpired(formId)) {
-      return reply.code(403).send({ error: 'Form has expired' });
+      return reply.status(403).send({ error: 'Form has expired' });
     }
 
     const userFormSubmissions = await Submission.find({ userId, formId }).sort({ timestamp: 1 });
     if (index < 0 || index >= userFormSubmissions.length) {
-      console.error(`Invalid submission index: ${index} for form ${formId} by user ${userId}`);
-      return reply.code(404).send({ error: 'Submission not found' });
+      fastify.log.error(`Invalid submission index: ${index} for form ${formId} by user ${userId}`);
+      return reply.status(404).send({ error: 'Submission not found' });
     }
 
     const submissionToDelete = userFormSubmissions[index];
     await Submission.deleteOne({ _id: submissionToDelete._id });
-    console.log(`Deleted submission at index ${index} for form ${formId} by user ${userId}`);
+    fastify.log.info(`Deleted submission at index ${index} for form ${formId} by user ${userId}`);
 
     return { message: 'Submission deleted successfully' };
   } catch (error) {
-    console.error('Error deleting submission:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to delete submission', details: error.message });
+    fastify.log.error('Error deleting submission:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to delete submission', details: error.message });
   }
 });
 
-fastify.delete('/form/:id', async (request, reply) => {
-  const formId = request.params.id;
-  const userId = request.user.userId;
+fastify.delete('/form/:id', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
+  const formId = req.params.id;
+  const userId = req.user.userId;
 
   try {
     const config = await FormConfig.findOne({ formId, userId });
     if (!config) {
-      console.error(`User ${userId} does not have access to form ${formId}`);
-      return reply.code(404).send({ error: 'Form not found or access denied' });
+      fastify.log.error(`User ${userId} does not have access to form ${formId}`);
+      return reply.status(404).send({ error: 'Form not found or access denied' });
     }
 
     await FormConfig.deleteOne({ formId });
     await Submission.deleteMany({ formId, userId });
-    console.log(`Deleted form ${formId} and its submissions for user ${userId}`);
+    fastify.log.info(`Deleted form ${formId} and its submissions for user ${userId}`);
 
     return { message: 'Form and associated submissions deleted successfully' };
   } catch (error) {
-    console.error('Error deleting form:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to delete form', details: error.message });
+    fastify.log.error('Error deleting form:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to delete form', details: error.message });
   }
 });
 
-fastify.get('/submissions', async (request, reply) => {
+fastify.get('/submissions', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
   try {
-    const userId = request.user.userId;
+    const userId = req.user.userId;
     const submissions = await Submission.find({ userId }).sort({ timestamp: -1 });
 
     const templates = {
@@ -1096,30 +1118,30 @@ fastify.get('/submissions', async (request, reply) => {
       },
     };
 
-    console.log(`Retrieved ${submissions.length} submissions for user ${userId}`);
+    fastify.log.info(`Retrieved ${submissions.length} submissions for user ${userId}`);
     return {
       submissions,
       templates,
       userId,
     };
   } catch (error) {
-    console.error('Error fetching submissions:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to fetch submissions', details: error.message });
+    fastify.log.error('Error fetching submissions:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to fetch submissions', details: error.message });
   }
 });
 
-fastify.get('/form/:id', async (request, reply) => {
-  const formId = request.params.id;
+fastify.get('/form/:id', async (req, reply) => {
+  const formId = req.params.id;
   const config = await FormConfig.findOne({ formId });
 
   if (!config) {
-    console.error(`Form not found for ID: ${formId}`);
-    return reply.code(404).send('Form not found');
+    fastify.log.error(`Form not found for ID: ${formId}`);
+    return reply.status(404).send('Form not found');
   }
 
   const adminSettings = await AdminSettings.findOne();
   if (adminSettings.restrictionsEnabled && await isFormExpired(formId)) {
-    return reply.code(403).send('Form has expired');
+    return reply.status(403).send('Form has expired');
   }
 
   const templates = {
@@ -1212,35 +1234,37 @@ fastify.get('/form/:id', async (request, reply) => {
       }),
     });
   } catch (error) {
-    console.error('Error rendering form:', error.message, error.stack);
-    return reply.code(500).send('Error rendering form');
+    fastify.log.error('Error rendering form:', error.message, error.stack);
+    return reply.status(500).send('Error rendering form');
   }
 });
 
-fastify.get('/api/form/:id', async (request, reply) => {
-  const formId = request.params.id;
-  const userId = request.user.userId;
+fastify.get('/api/form/:id', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
+  const formId = req.params.id;
+  const userId = req.user.userId;
 
   try {
     const config = await FormConfig.findOne({ formId, userId });
     if (!config) {
-      console.error(`Form not found for ID: ${formId}`);
-      return reply.code(404).send({ error: 'Form not found' });
+      fastify.log.error(`Form not found for ID: ${formId}`);
+      return reply.status(404).send({ error: 'Form not found' });
     }
     const adminSettings = await AdminSettings.findOne();
     if (adminSettings.restrictionsEnabled && await isFormExpired(formId)) {
-      return reply.code(403).send({ error: 'Form has expired' });
+      return reply.status(403).send({ error: 'Form has expired' });
     }
 
-    console.log(`Retrieved form config for ${formId} for user ${userId}`);
+    fastify.log.info(`Retrieved form config for ${formId} for user ${userId}`);
     return {
       ...config.toObject(),
       formId,
       message: 'Form configuration retrieved successfully',
     };
   } catch (error) {
-    console.error('Error fetching form config for /api/form/:id:', error.message, error.stack);
-    return reply.code(500).send({ error: 'Failed to fetch form configuration', details: error.message });
+    fastify.log.error('Error fetching form config for /api/form/:id:', error.message, error.stack);
+    return reply.status(500).send({ error: 'Failed to fetch form configuration', details: error.message });
   }
 });
 
@@ -1249,41 +1273,42 @@ function isValidPlan(planId) {
   return allowedPlans.includes(planId);
 }
 
-fastify.post('/api/subscription/initiate-payment', async (request, reply) => {
-  const { planId, email, price } = request.body;
-  const userId = request.user.userId;
+fastify.post('/api/subscription/initiate-payment', {
+  preHandler: [authenticateToken],
+}, async (req, reply) => {
+  const { planId, email, price } = req.body;
+  const userId = req.user.userId;
 
-  console.log(`Received payment initiation request: userId=${userId}, planId=${planId}, email=${email}, price=${price}`);
+  fastify.log.info(`Received payment initiation request: userId=${userId}, planId=${planId}, email=${email}, price=${price}`);
 
   try {
     if (!planId || !email || !price) {
-      console.error('Validation failed: Missing required fields');
-      return reply.code(400).send({ error: 'Missing required fields: planId, email, and price are required' });
+      fastify.log.error('Validation failed: Missing required fields');
+      return reply.status(400).send({ error: 'Missing required fields: planId, email, and price are required' });
     }
 
     if (!isValidPlan(planId)) {
-      console.error(`Validation failed: Invalid planId: ${planId}`);
-      return reply.code(400).send({ error: `Invalid planId. Must be one of: ${allowedPlans.join(', ')}` });
+      fastify.log.error(`Validation failed: Invalid planId: ${planId}`);
+      return reply.status(400).send({ error: `Invalid planId. Must be one of: ${allowedPlans.join(', ')}` });
     }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      console.error('Validation failed: Invalid email format');
-      return reply.code(400).send({ error: 'Invalid email format' });
+      fastify.log.error('Validation failed: Invalid email format');
+      return reply.status(400).send({ error: 'Invalid email format' });
     }
 
     if (!Number.isInteger(price) || price <= 0) {
-      console.error('Validation failed: Invalid price');
-      return reply.code(400).send({ error: 'Price must be a positive integer' });
+      fastify.log.error('Validation failed: Invalid price');
+      return reply.status(400).send({ error: 'Price must be a positive integer' });
     }
 
     const existingSubscription = await hasActiveSubscription(userId);
     if (existingSubscription && existingSubscription.billingPeriod === planId.split('-')[1]) {
-      console.warn(`User ${userId} already has an active ${planId.split('-')[1]} subscription`);
-      return reply.code(400).send({ error: `You already have an active ${planId.split('-')[1]} subscription` });
+      fastify.log.warn(`User ${userId} already has an active ${planId.split('-')[1]} subscription`);
+      return reply.status(400).send({ error: `You already have an active ${planId.split('-')[1]} subscription` });
     }
 
-    console.log('Making Paystack API request to /transaction/initialize');
-    const axios = require('axios');
+    fastify.log.info('Making Paystack API request to /transaction/initialize');
     const response = await axios.post(
       'https://api.paystack.co/transaction/initialize',
       {
@@ -1303,11 +1328,11 @@ fastify.post('/api/subscription/initiate-payment', async (request, reply) => {
       }
     );
 
-    console.log('Paystack response:', response.data);
+    fastify.log.info('Paystack response:', response.data);
 
     if (!response.data.status || !response.data.data.authorization_url || !response.data.data.reference) {
-      console.error('Paystack response missing required fields:', response.data);
-      return reply.code(500).send({ error: 'Failed to initialize payment with Paystack' });
+      fastify.log.error('Paystack response missing required fields:', response.data);
+      return reply.status(500).send({ error: 'Failed to initialize payment with Paystack' });
     }
 
     const { authorization_url: authorizationUrl, reference } = response.data.data;
@@ -1322,7 +1347,7 @@ fastify.post('/api/subscription/initiate-payment', async (request, reply) => {
       createdAt: new Date().toISOString(),
     });
 
-    console.log('Saving subscription:', subscription);
+    fastify.log.info('Saving subscription:', subscription);
     await subscription.save();
 
     return {
@@ -1331,7 +1356,7 @@ fastify.post('/api/subscription/initiate-payment', async (request, reply) => {
       reference,
     };
   } catch (error) {
-    console.error('Error in /api/subscription/initiate-payment:', {
+    fastify.log.error('Error in /api/subscription/initiate-payment:', {
       message: error.message,
       stack: error.stack,
       axiosError: error.response ? {
@@ -1339,25 +1364,27 @@ fastify.post('/api/subscription/initiate-payment', async (request, reply) => {
         data: error.response.data,
       } : null,
     });
-    return reply.code(500).send({ error: 'Failed to initiate payment' });
+    return reply.status(500).send({ error: 'Failed to initiate payment' });
   }
 });
 
-fastify.post('/api/subscription/webhook', async (request, reply) => {
-  console.log('Webhook received:', request.body);
+fastify.post('/api/subscription/webhook', {
+  preHandler: [verifyPaystackWebhook],
+}, async (req, reply) => {
+  fastify.log.info('Webhook received:', req.body);
 
   try {
-    const event = request.body;
+    const event = req.body;
     if (event.event === 'charge.success') {
       const { reference, metadata, status } = event.data;
       const { userId, planId, billingPeriod } = metadata;
 
-      console.log(`Processing webhook: reference=${reference}, userId=${userId}, planId=${planId}, status=${status}`);
+      fastify.log.info(`Processing webhook: reference=${reference}, userId=${userId}, planId=${planId}, status=${status}`);
 
       const subscription = await Subscription.findOne({ reference });
       if (!subscription) {
-        console.error(`Webhook error: Subscription not found for reference ${reference}`);
-        return reply.code(404).send({ error: 'Subscription not found' });
+        fastify.log.error(`Webhook error: Subscription not found for reference ${reference}`);
+        return reply.status(404).send({ error: 'Subscription not found' });
       }
 
       await Subscription.updateMany(
@@ -1371,36 +1398,37 @@ fastify.post('/api/subscription/webhook', async (request, reply) => {
         Date.now() + (billingPeriod === 'weekly' ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000)
       ).toISOString();
 
-      console.log('Updating subscription:', subscription);
+      fastify.log.info('Updating subscription:', subscription);
       await subscription.save();
 
       return { message: 'Webhook processed successfully' };
     } else {
-      console.log('Webhook ignored: Not a charge.success event');
+      fastify.log.info('Webhook ignored: Not a charge.success event');
       return { message: 'Event ignored' };
     }
   } catch (error) {
-    console.error('Webhook error:', error.message);
-    return reply.code(500).send({ error: 'Failed to process webhook' });
+    fastify.log.error('Webhook error:', error.message);
+    return reply.status(500).send({ error: 'Failed to process webhook' });
   }
 });
 
-// Options for preflight (handled by CORS, but for explicit)
-fastify.options('/*', async (request, reply) => {
+// Handle OPTIONS requests for CORS
+fastify.options('/*', async (req, reply) => {
   reply.header('Access-Control-Allow-Origin', '*');
   reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   reply.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization');
-  return reply.code(200).send();
+  return reply.status(200).send();
 });
 
 // Start the server
 const start = async () => {
   try {
-    await fastify.listen({ port });
-    fastify.log.info(`Server is running on port ${port}`);
-  } catch (err) {
-    fastify.log.error(err);
+    await fastify.listen({ port: PORT, host: '0.0.0.0' });
+    fastify.log.info(`Server is running on port ${PORT}`);
+  } catch (error) {
+    fastify.log.error('Server startup error:', error.message, error.stack);
     process.exit(1);
   }
 };
+
 start();
